@@ -1,0 +1,13 @@
+[project]
+name = "gmetrics"
+version = "0.1.0"
+description = "CLI for GCP Cloud Monitoring API v3"
+requires-python = ">=3.10"
+dependencies = ["click>=8.0"]
+
+[project.scripts]
+gcm = "gmetrics:cli"
+
+[build-system]
+requires = ["uv_build>=0.7.2,<0.8"]
+build-backend = "uv_build"
