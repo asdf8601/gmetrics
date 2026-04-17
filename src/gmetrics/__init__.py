@@ -1,4 +1,4 @@
-"""gcm - CLI for GCP Cloud Monitoring API v3.
+"""gmetrics - CLI for GCP Cloud Monitoring API v3.
 
 Also importable as a library:
 
@@ -693,7 +693,7 @@ def _cli_validate(fn):
 @click.option("--json", "as_json", is_flag=True, help="Raw JSON output")
 @click.pass_context
 def cli(ctx, project, as_json):
-    """gcm - query Kubernetes metrics from GCP Cloud Monitoring."""
+    """gmetrics - query Kubernetes metrics from GCP Cloud Monitoring."""
     ctx.ensure_object(dict)
     ctx.obj["project"] = project
     ctx.obj["json"] = as_json
@@ -728,9 +728,9 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container):
 
     \b
     Examples:
-      gcm pod my-service
-      gcm pod my-service --start 1h --cluster us-east1
-      gcm pod my-pod --namespace production --container main
+      gmetrics pod my-service
+      gmetrics pod my-service --start 1h --cluster us-east1
+      gmetrics pod my-pod --namespace production --container main
     """
     result = metric_pod(
         ctx.obj["project"],
@@ -772,8 +772,8 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit):
 
     \b
     Examples:
-      gcm top cpu --namespace prod --start 15m
-      gcm top memory --cluster us-east1 --limit 20
+      gmetrics top cpu --namespace prod --start 15m
+      gmetrics top memory --cluster us-east1 --limit 20
     """
     result = metric_top(
         ctx.obj["project"],
@@ -813,8 +813,8 @@ def node(ctx, node_name, start, end, period, cluster):
 
     \b
     Examples:
-      gcm node gke-my-cluster-pool-abc
-      gcm node my-node --start 2h --cluster us-east1
+      gmetrics node gke-my-cluster-pool-abc
+      gmetrics node my-node --start 2h --cluster us-east1
     """
     result = metric_node(
         ctx.obj["project"],
@@ -865,9 +865,9 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
 
     \b
     Examples:
-      gcm query "kubernetes.io/container/memory/used_bytes" \\
+      gmetrics query "kubernetes.io/container/memory/used_bytes" \\
           --filter 'resource.labels.pod_name="my-pod"' --aligner mean
-      gcm query "custom.googleapis.com/my/metric" --aligner rate --period 5m
+      gmetrics query "custom.googleapis.com/my/metric" --aligner rate --period 5m
     """
     group_fields = [g.strip() for g in group_by.split(",")] if group_by else None
     series = metric_query(
@@ -901,8 +901,8 @@ def metrics(ctx, filt):
 
     \b
     Examples:
-      gcm metrics --filter kubernetes.io/container
-      gcm metrics --filter custom.googleapis.com
+      gmetrics metrics --filter kubernetes.io/container
+      gmetrics metrics --filter custom.googleapis.com
     """
     descriptors = metric_descriptors(ctx.obj["project"], filt=filt)
     if ctx.obj["json"]:
