@@ -1,7 +1,7 @@
 [project]
 name = "gmetrics"
 version = "0.1.1"
-description = "CLI for GCP Cloud Monitoring API v3"
+description = "CLI for querying Kubernetes metrics from GCP Cloud Monitoring API v3"
 requires-python = ">=3.10"
 dependencies = ["click>=8.0"]
 
