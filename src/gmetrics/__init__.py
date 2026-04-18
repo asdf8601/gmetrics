@@ -678,12 +678,12 @@ def render_descriptors(descriptors):
         click.echo("No metric descriptors found.")
         return
 
-    click.echo(f"\n  {'KIND':<12}  {'VALUE TYPE':<10}  METRIC TYPE")
+    click.echo(f"\n  {'KIND':<12}  {'VALUE TYPE':<14}  METRIC TYPE")
     click.echo("  " + "\u2500" * 90)
     for d in descriptors:
         click.echo(
             f"  {d.get('metricKind', '?'):<12}  "
-            f"{d.get('valueType', '?'):<10}  "
+            f"{d.get('valueType', '?'):<14}  "
             f"{d.get('type', '?')}"
         )
     click.echo(f"\n  {len(descriptors)} descriptors.")
