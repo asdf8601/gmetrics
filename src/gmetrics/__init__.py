@@ -29,6 +29,7 @@ __all__ = [
     "metric_query",
     "metric_labels",
     "metric_descriptors",
+    "auto_period",
     "get_token",
     "set_token",
     "fetch_time_series",
@@ -199,6 +200,57 @@ def _parse_period(s):
     n, u = int(m.group(1)), m.group(2)
     secs = {"s": n, "m": n * 60, "h": n * 3600}[u]
     return f"{secs}s"
+
+
+_NICE_PERIODS_SEC = (60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
+
+
+def _window_seconds(start):
+    """Return the window length in seconds for a relative start string.
+
+    Returns None if `start` is not relative (e.g. RFC3339 absolute).
+    """
+    if not start:
+        return None
+    m = re.match(r"^(\d+)([mhdw])$", start)
+    if not m:
+        return None
+    n, u = int(m.group(1)), m.group(2)
+    unit_secs = {"m": 60, "h": 3600, "d": 86400, "w": 604800}[u]
+    return n * unit_secs
+
+
+def _pretty_period(period):
+    """Render a seconds-based period like '600s' as '10m', '3600s' as '1h'."""
+    if not period:
+        return ""
+    m = re.match(r"^(\d+)s$", period)
+    if not m:
+        return period
+    secs = int(m.group(1))
+    if secs % 86400 == 0 and secs >= 86400:
+        return f"{secs // 86400}d"
+    if secs % 3600 == 0 and secs >= 3600:
+        return f"{secs // 3600}h"
+    if secs % 60 == 0 and secs >= 60:
+        return f"{secs // 60}m"
+    return f"{secs}s"
+
+
+def auto_period(start, target_bars=60):
+    """Pick an alignment period so the window renders ~target_bars buckets.
+
+    Snaps to human-friendly values (60s, 5m, 15m, 30m, 1h, 3h, 6h, 12h, 1d).
+    Falls back to "60s" for absolute or unparseable start strings.
+    """
+    secs = _window_seconds(start)
+    if not secs:
+        return "60s"
+    bucket = max(60, secs // target_bars)
+    for v in _NICE_PERIODS_SEC:
+        if bucket <= v:
+            return f"{v}s"
+    return f"{_NICE_PERIODS_SEC[-1]}s"
 
 
 def _resolve_aligner(s):
@@ -445,9 +497,13 @@ def _combine_series(series_list):
     return [v for _, v in ordered]
 
 
-def render_pod(cpu_series, mem_series, name):
+def render_pod(cpu_series, mem_series, name, period=None):
     """Render CPU + memory for a pod/node with sparklines and summary."""
-    click.echo(f"\n  {name}\n")
+    pretty = _pretty_period(period)
+    header = f"\n  {name}"
+    if pretty:
+        header += f"  (1 bar = {pretty})"
+    click.echo(header + "\n")
 
     for label, series_list, fmt in [
         ("CPU", cpu_series, _fmt_cpu),
@@ -473,7 +529,7 @@ def render_pod(cpu_series, mem_series, name):
         click.echo()
 
 
-def render_top(grouped, metric_type, limit, rows=None, columns=None):
+def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None):
     """Render ranked table of pods by metric value.
 
     When `rows` (list of {pod, extras, values}) and `columns` are provided,
@@ -507,6 +563,10 @@ def render_top(grouped, metric_type, limit, rows=None, columns=None):
     if not ranked:
         click.echo("No data found.")
         return
+
+    pretty = _pretty_period(period)
+    if pretty:
+        click.echo(f"  (1 TREND bar = {pretty})")
 
     max_name = max(len(r[0]) for r in ranked)
     max_name = max(max_name, 8)
@@ -575,11 +635,15 @@ def _format_query_labels(rl, ml):
     return "  ".join(parts)
 
 
-def render_query(series_list, metric_type):
+def render_query(series_list, metric_type, period=None):
     """Render raw time series output with sparklines."""
     if not series_list:
         click.echo("No time series found.")
         return
+
+    pretty = _pretty_period(period)
+    if pretty:
+        click.echo(f"\n  (1 bar = {pretty})")
 
     for s in series_list:
         rl = s.get("resource", {}).get("labels", {})
@@ -957,7 +1021,9 @@ def cli(ctx, project, as_json):
 )
 @click.option("--end", default=None, help="End time (default: now)")
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m, 1h)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start to render ~60 sparkline buckets.",
 )
 @click.option("--namespace", default=None, help="Kubernetes namespace")
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
@@ -983,6 +1049,7 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
       gmetrics pod my-service --start 1h --cluster us-east1
       gmetrics pod my-pod --namespace production --container main
     """
+    period = period or auto_period(start)
     result = metric_pod(
         ctx.obj["project"],
         pod_name,
@@ -997,7 +1064,7 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(result["cpu"], result["mem"], pod_name)
+        render_pod(result["cpu"], result["mem"], pod_name, period=period)
 
 
 @cli.command()
@@ -1010,7 +1077,9 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
 )
 @click.option("--end", default=None, help="End time (default: now)")
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start.",
 )
 @click.option("--namespace", default=None, help="Kubernetes namespace")
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
@@ -1051,6 +1120,7 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
       gmetrics top memory --pod-pattern my-service --limit 20
       gmetrics top memory --pod-pattern my-service --show cluster,namespace
     """
+    period = period or auto_period(start)
     show_fields = _resolve_show_fields(show)
     result = metric_top(
         ctx.obj["project"],
@@ -1074,6 +1144,7 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
             limit,
             rows=result.get("rows"),
             columns=result.get("columns"),
+            period=period,
         )
 
 
@@ -1087,7 +1158,9 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
 )
 @click.option("--end", default=None, help="End time (default: now)")
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m, 1h)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start.",
 )
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
 @click.option(
@@ -1109,6 +1182,7 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
       gmetrics node gke-my-cluster-pool-abc
       gmetrics node my-node --start 2h --cluster us-east1
     """
+    period = period or auto_period(start)
     result = metric_node(
         ctx.obj["project"],
         node_name,
@@ -1121,7 +1195,7 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(result["cpu"], result["mem"], node_name)
+        render_pod(result["cpu"], result["mem"], node_name, period=period)
 
 
 @cli.command()
@@ -1156,7 +1230,9 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
     "--reducer", default=None, help="Cross-series reducer (sum, mean, max, min, count)"
 )
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m, 1h)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start.",
 )
 @click.option("--group-by", default=None, help="Comma-separated fields to group by")
 @click.pass_context
@@ -1174,6 +1250,7 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
           --aligner max --group-by resource.labels.pod_name
       gmetrics query "custom.googleapis.com/my/metric" --aligner rate --period 5m
     """
+    period = period or auto_period(start)
     group_fields = [g.strip() for g in group_by.split(",")] if group_by else None
     series = metric_query(
         ctx.obj["project"],
@@ -1189,7 +1266,7 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
     if ctx.obj["json"]:
         click.echo(json.dumps(series, indent=2))
     else:
-        render_query(series, metric_type)
+        render_query(series, metric_type, period=period)
 
 
 @cli.command()
