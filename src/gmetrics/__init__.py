@@ -505,25 +505,29 @@ def render_pod(cpu_series, mem_series, name, period=None):
         header += f"  (1 bar = {pretty})"
     click.echo(header + "\n")
 
-    for label, series_list, fmt in [
+    sections = [
         ("CPU", cpu_series, _fmt_cpu),
         ("Memory", mem_series, _fmt_bytes),
-    ]:
+    ]
+    label_w = max(len(lbl) for lbl, _, _ in sections)
+    stats_indent = " " * (2 + label_w + 2)
+
+    for label, series_list, fmt in sections:
         if not series_list:
-            click.echo(f"  {label}: no data\n")
+            click.echo(f"  {label:<{label_w}}: no data\n")
             continue
 
         values = _combine_series(series_list)
         if not values:
-            click.echo(f"  {label}: no data points\n")
+            click.echo(f"  {label:<{label_w}}: no data points\n")
             continue
 
         stats = _summary(values)
         spark = _sparkline(values)
 
-        click.echo(f"  {label}  {spark}")
+        click.echo(f"  {label:<{label_w}}  {spark}")
         click.echo(
-            f"    min {fmt(stats['min'])}  avg {fmt(stats['avg'])}  "
+            f"{stats_indent}min {fmt(stats['min'])}  avg {fmt(stats['avg'])}  "
             f"max {fmt(stats['max'])}  last {fmt(stats['last'])}"
         )
         click.echo()
