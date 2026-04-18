@@ -225,6 +225,29 @@ def _escape_re(s):
     return re.sub(r"([.+?^${}()|[\]\\])", r"\\\1", s)
 
 
+def _validate_user_filter(filt):
+    """Reject common filter mistakes with actionable errors.
+
+    GCP Monitoring filter language does NOT support `=~` or `!~`.
+    Use `monitoring.regex.full_match("pat")` or `starts_with("prefix")`.
+    """
+    if not filt:
+        return
+    if re.search(r"=~|!~", filt):
+        raise ValueError(
+            "Invalid filter: GCP Monitoring does not support '=~' or '!~'. "
+            'Use: label = monitoring.regex.full_match("regex") '
+            'or: label = starts_with("prefix")'
+        )
+
+
+def _memory_type_filter(memory_type):
+    """Build memory_type filter fragment, or return None for 'any'."""
+    if not memory_type or memory_type == "any":
+        return None
+    return f'metric.labels.memory_type = "{memory_type}"'
+
+
 def _pod_filter(pod_name, namespace=None, cluster=None, container=None):
     """Build monitoring filter for pod-level k8s_container metrics."""
     parts = ['resource.type = "k8s_container"']
@@ -441,6 +464,43 @@ def render_top(grouped, metric_type, limit):
     click.echo()
 
 
+_QUERY_LABEL_ORDER = (
+    "pod_name",
+    "node_name",
+    "container_name",
+    "namespace_name",
+    "cluster_name",
+    "location",
+    "memory_type",
+)
+_QUERY_LABEL_ABBR = {
+    "pod_name": "pod",
+    "node_name": "node",
+    "container_name": "container",
+    "namespace_name": "ns",
+    "cluster_name": "cluster",
+    "location": "loc",
+    "memory_type": "mem_type",
+}
+_QUERY_LABEL_HIDE = {"project_id"}
+
+
+def _format_query_labels(rl, ml):
+    """Format series labels in stable order with short keys."""
+    combined = {**rl, **ml}
+    seen = set()
+    parts = []
+    for key in _QUERY_LABEL_ORDER:
+        if key in combined:
+            parts.append(f"{_QUERY_LABEL_ABBR.get(key, key)}={combined[key]}")
+            seen.add(key)
+    for k, v in combined.items():
+        if k in seen or k in _QUERY_LABEL_HIDE:
+            continue
+        parts.append(f"{k}={v}")
+    return "  ".join(parts)
+
+
 def render_query(series_list, metric_type):
     """Render raw time series output with sparklines."""
     if not series_list:
@@ -450,8 +510,7 @@ def render_query(series_list, metric_type):
     for s in series_list:
         rl = s.get("resource", {}).get("labels", {})
         ml = s.get("metric", {}).get("labels", {})
-        labels = {**rl, **ml}
-        label_str = " ".join(f"{k}={v}" for k, v in labels.items())
+        label_str = _format_query_labels(rl, ml)
 
         vals = _series_values(s)
         values = [v for _, v in vals]
@@ -500,11 +559,18 @@ def metric_pod(
     namespace=None,
     cluster=None,
     container=None,
+    memory_type="non-evictable",
 ):
-    """Fetch CPU + memory for a pod."""
+    """Fetch CPU + memory for a pod.
+
+    memory_type: "non-evictable" (default), "evictable", or "any".
+        Memory metric returns two series per pod; filtering avoids double-sum.
+    """
     filt = _pod_filter(
         pod_name, namespace=namespace, cluster=cluster, container=container
     )
+    mem_extra = _memory_type_filter(memory_type)
+    mem_filt = f"{filt} AND {mem_extra}" if mem_extra else filt
 
     cpu_params = _build_ts_params(
         _CPU_METRIC,
@@ -518,7 +584,7 @@ def metric_pod(
     )
     mem_params = _build_ts_params(
         _MEM_METRIC,
-        filt,
+        mem_filt,
         start,
         end,
         period,
@@ -537,10 +603,19 @@ def metric_pod(
 
 
 def metric_node(
-    project, node_name, *, start="1h", end=None, period="60s", cluster=None
+    project,
+    node_name,
+    *,
+    start="1h",
+    end=None,
+    period="60s",
+    cluster=None,
+    memory_type="non-evictable",
 ):
     """Fetch CPU + memory for a node."""
     filt = _node_filter(node_name, cluster=cluster)
+    mem_extra = _memory_type_filter(memory_type)
+    mem_filt = f"{filt} AND {mem_extra}" if mem_extra else filt
 
     cpu_params = _build_ts_params(
         _NODE_CPU_METRIC,
@@ -554,7 +629,7 @@ def metric_node(
     )
     mem_params = _build_ts_params(
         _NODE_MEM_METRIC,
-        filt,
+        mem_filt,
         start,
         end,
         period,
@@ -582,8 +657,15 @@ def metric_top(
     namespace=None,
     cluster=None,
     limit=10,
+    pod_pattern=None,
+    memory_type="non-evictable",
 ):
-    """Rank pods by CPU or memory usage."""
+    """Rank pods by CPU or memory usage.
+
+    pod_pattern: optional substring to filter pod names (e.g. "ssp-service").
+    memory_type: "non-evictable" (default), "evictable", or "any" — only
+        applied when metric == "memory" (avoids double-counting).
+    """
     if metric == "cpu":
         metric_type, aligner = _CPU_METRIC, _CPU_ALIGNER
     elif metric == "memory":
@@ -596,6 +678,15 @@ def metric_top(
         parts.append(f'resource.labels.namespace_name = "{namespace}"')
     if cluster:
         parts.append(f'resource.labels.cluster_name = "{cluster}"')
+    if pod_pattern:
+        safe = _escape_re(pod_pattern)
+        parts.append(
+            f'resource.labels.pod_name = monitoring.regex.full_match(".*{safe}.*")'
+        )
+    if metric == "memory":
+        mem_extra = _memory_type_filter(memory_type)
+        if mem_extra:
+            parts.append(mem_extra)
     filt = " AND ".join(parts)
 
     params = _build_ts_params(
@@ -631,6 +722,7 @@ def metric_query(
     group_by=None,
 ):
     """Generic metric query."""
+    _validate_user_filter(filt)
     aligner = _resolve_aligner(aligner)
     if reducer:
         reducer = _resolve_reducer(reducer)
@@ -718,9 +810,16 @@ def cli(ctx, project, as_json):
 @click.option("--namespace", default=None, help="Kubernetes namespace")
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
 @click.option("--container", default=None, help="Container name (default: all)")
+@click.option(
+    "--memory-type",
+    type=click.Choice(["non-evictable", "evictable", "any"]),
+    default="non-evictable",
+    show_default=True,
+    help="Memory series filter (avoids evictable+non-evictable double-sum)",
+)
 @click.pass_context
 @_cli_validate
-def pod(ctx, pod_name, start, end, period, namespace, cluster, container):
+def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory_type):
     """CPU and memory for a Kubernetes pod.
 
     POD_NAME is a substring match (e.g. 'my-service' matches
@@ -741,6 +840,7 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container):
         namespace=namespace,
         cluster=cluster,
         container=container,
+        memory_type=memory_type,
     )
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
@@ -765,15 +865,28 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container):
 @click.option(
     "--limit", default=10, show_default=True, type=int, help="Number of pods to show"
 )
+@click.option(
+    "--pod-pattern",
+    default=None,
+    help="Substring filter on pod name (e.g. 'ssp-service')",
+)
+@click.option(
+    "--memory-type",
+    type=click.Choice(["non-evictable", "evictable", "any"]),
+    default="non-evictable",
+    show_default=True,
+    help="Memory series filter (memory metric only)",
+)
 @click.pass_context
 @_cli_validate
-def top(ctx, metric, start, end, period, namespace, cluster, limit):
+def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern, memory_type):
     """Rank pods by CPU or memory usage.
 
     \b
     Examples:
       gmetrics top cpu --namespace prod --start 15m
       gmetrics top memory --cluster us-east1 --limit 20
+      gmetrics top memory --pod-pattern ssp-service --limit 20
     """
     result = metric_top(
         ctx.obj["project"],
@@ -784,6 +897,8 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit):
         namespace=namespace,
         cluster=cluster,
         limit=limit,
+        pod_pattern=pod_pattern,
+        memory_type=memory_type,
     )
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
@@ -804,9 +919,16 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit):
     "--period", default="60s", show_default=True, help="Alignment period (60s, 5m, 1h)"
 )
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
+@click.option(
+    "--memory-type",
+    type=click.Choice(["non-evictable", "evictable", "any"]),
+    default="non-evictable",
+    show_default=True,
+    help="Memory series filter (avoids double-sum)",
+)
 @click.pass_context
 @_cli_validate
-def node(ctx, node_name, start, end, period, cluster):
+def node(ctx, node_name, start, end, period, cluster, memory_type):
     """CPU and memory for a Kubernetes node.
 
     NODE_NAME is a substring match.
@@ -823,6 +945,7 @@ def node(ctx, node_name, start, end, period, cluster):
         end=end,
         period=period,
         cluster=cluster,
+        memory_type=memory_type,
     )
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
@@ -843,7 +966,14 @@ def node(ctx, node_name, start, end, period, cluster):
     "--filter",
     "filt",
     default=None,
-    help="Additional monitoring filter (AND-ed with metric.type)",
+    help=(
+        'Additional monitoring filter (AND-ed). Examples: '
+        'resource.labels.pod_name = "my-pod", '
+        'resource.labels.pod_name = starts_with("prefix"), '
+        'metric.labels.memory_type = "non-evictable". '
+        "NOTE: '=~' is NOT supported — use starts_with() or "
+        "monitoring.regex.full_match()."
+    ),
 )
 @click.option(
     "--aligner",
@@ -866,7 +996,11 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
     \b
     Examples:
       gmetrics query "kubernetes.io/container/memory/used_bytes" \\
-          --filter 'resource.labels.pod_name="my-pod"' --aligner mean
+          --filter 'resource.labels.pod_name = "my-pod"' --aligner mean
+      gmetrics query "kubernetes.io/container/memory/used_bytes" \\
+          --filter 'resource.labels.pod_name = starts_with("ssp-service") \\
+                    AND metric.labels.memory_type = "non-evictable"' \\
+          --aligner max --group-by resource.labels.pod_name
       gmetrics query "custom.googleapis.com/my/metric" --aligner rate --period 5m
     """
     group_fields = [g.strip() for g in group_by.split(",")] if group_by else None
