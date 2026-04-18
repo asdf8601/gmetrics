@@ -533,12 +533,14 @@ def render_pod(cpu_series, mem_series, name, period=None):
         click.echo()
 
 
-def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None):
+def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None, order="desc"):
     """Render ranked table of pods by metric value.
 
     When `rows` (list of {pod, extras, values}) and `columns` are provided,
     additional columns are rendered between POD and LAST. Otherwise falls
     back to the legacy grouped-by-pod view.
+
+    order: "desc" (highest last first) or "asc" (lowest first).
     """
     fmt = _fmt_cpu if "cpu" in metric_type else _fmt_bytes
     columns = columns or []
@@ -561,7 +563,7 @@ def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None
             spark = _sparkline(values)
             ranked.append((pod_name, {}, stats, spark))
 
-    ranked.sort(key=lambda x: -x[2]["last"])
+    ranked.sort(key=lambda x: x[2]["last"], reverse=(order != "asc"))
     ranked = ranked[:limit]
 
     if not ranked:
@@ -676,13 +678,13 @@ def render_descriptors(descriptors):
         click.echo("No metric descriptors found.")
         return
 
-    click.echo(f"\n  {'METRIC TYPE':<65}  {'KIND':<12}  VALUE TYPE")
+    click.echo(f"\n  {'KIND':<12}  {'VALUE TYPE':<10}  METRIC TYPE")
     click.echo("  " + "\u2500" * 90)
     for d in descriptors:
         click.echo(
-            f"  {d.get('type', '?'):<65}  "
-            f"{d.get('metricKind', '?'):<12}  "
-            f"{d.get('valueType', '?')}"
+            f"  {d.get('metricKind', '?'):<12}  "
+            f"{d.get('valueType', '?'):<10}  "
+            f"{d.get('type', '?')}"
         )
     click.echo(f"\n  {len(descriptors)} descriptors.")
     click.echo()
@@ -1112,9 +1114,16 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
         "Or full GCP field paths, e.g. 'resource.labels.cluster_name'."
     ),
 )
+@click.option(
+    "--order",
+    type=click.Choice(["desc", "asc"]),
+    default="desc",
+    show_default=True,
+    help="Sort direction by LAST value. 'asc' = lowest usage first.",
+)
 @click.pass_context
 @_cli_validate
-def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern, memory_type, show):
+def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern, memory_type, show, order):
     """Rank pods by CPU or memory usage.
 
     \b
@@ -1123,6 +1132,7 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
       gmetrics top memory --cluster us-east1 --limit 20
       gmetrics top memory --pod-pattern my-service --limit 20
       gmetrics top memory --pod-pattern my-service --show cluster,namespace
+      gmetrics top cpu --order asc --limit 20   # lowest CPU pods
     """
     period = period or auto_period(start)
     show_fields = _resolve_show_fields(show)
@@ -1149,6 +1159,7 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
             rows=result.get("rows"),
             columns=result.get("columns"),
             period=period,
+            order=order,
         )
 
 

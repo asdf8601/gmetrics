@@ -48,6 +48,7 @@ gmetrics labels <metric>   # show available resource + metric labels
 | `--memory-type` | `non-evictable` (default), `evictable`, `any` — avoids double-counting |
 | `--pod-pattern` | Substring filter on pod name (`top` only) |
 | `--show` | Extra columns for `top` — CSV of `cluster`, `namespace`, `container`, `location`, `node`, `memory_type`, or full GCP field paths |
+| `--order` | Sort direction for `top` — `desc` (default, highest first) or `asc` (lowest first) |
 | `--json` | Raw JSON output (global, before command) |
 | `--project` | GCP project ID |
 
@@ -68,6 +69,9 @@ gmetrics top memory --cluster us-east1 --limit 20
 
 # Top with extra columns (cluster, namespace)
 gmetrics top memory --pod-pattern my-service --show cluster,namespace --limit 10
+
+# Bottom: pods using the LEAST memory (over-provisioned candidates)
+gmetrics top memory --order asc --limit 20
 
 # Discover which labels a metric exposes (useful for --show / --group-by)
 gmetrics labels "kubernetes.io/container/memory/used_bytes" \
