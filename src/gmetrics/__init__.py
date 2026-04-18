@@ -662,7 +662,7 @@ def metric_top(
 ):
     """Rank pods by CPU or memory usage.
 
-    pod_pattern: optional substring to filter pod names (e.g. "ssp-service").
+    pod_pattern: optional substring to filter pod names (e.g. "my-service").
     memory_type: "non-evictable" (default), "evictable", or "any" — only
         applied when metric == "memory" (avoids double-counting).
     """
@@ -868,7 +868,7 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
 @click.option(
     "--pod-pattern",
     default=None,
-    help="Substring filter on pod name (e.g. 'ssp-service')",
+    help="Substring filter on pod name (e.g. 'my-service')",
 )
 @click.option(
     "--memory-type",
@@ -886,7 +886,7 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
     Examples:
       gmetrics top cpu --namespace prod --start 15m
       gmetrics top memory --cluster us-east1 --limit 20
-      gmetrics top memory --pod-pattern ssp-service --limit 20
+      gmetrics top memory --pod-pattern my-service --limit 20
     """
     result = metric_top(
         ctx.obj["project"],
@@ -998,7 +998,7 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
       gmetrics query "kubernetes.io/container/memory/used_bytes" \\
           --filter 'resource.labels.pod_name = "my-pod"' --aligner mean
       gmetrics query "kubernetes.io/container/memory/used_bytes" \\
-          --filter 'resource.labels.pod_name = starts_with("ssp-service") \\
+          --filter 'resource.labels.pod_name = starts_with("my-service") \\
                     AND metric.labels.memory_type = "non-evictable"' \\
           --aligner max --group-by resource.labels.pod_name
       gmetrics query "custom.googleapis.com/my/metric" --aligner rate --period 5m
