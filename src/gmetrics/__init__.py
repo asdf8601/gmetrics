@@ -220,6 +220,23 @@ def _window_seconds(start):
     return n * unit_secs
 
 
+def _pretty_period(period):
+    """Render a seconds-based period like '600s' as '10m', '3600s' as '1h'."""
+    if not period:
+        return ""
+    m = re.match(r"^(\d+)s$", period)
+    if not m:
+        return period
+    secs = int(m.group(1))
+    if secs % 86400 == 0 and secs >= 86400:
+        return f"{secs // 86400}d"
+    if secs % 3600 == 0 and secs >= 3600:
+        return f"{secs // 3600}h"
+    if secs % 60 == 0 and secs >= 60:
+        return f"{secs // 60}m"
+    return f"{secs}s"
+
+
 def auto_period(start, target_bars=60):
     """Pick an alignment period so the window renders ~target_bars buckets.
 
@@ -480,9 +497,13 @@ def _combine_series(series_list):
     return [v for _, v in ordered]
 
 
-def render_pod(cpu_series, mem_series, name):
+def render_pod(cpu_series, mem_series, name, period=None):
     """Render CPU + memory for a pod/node with sparklines and summary."""
-    click.echo(f"\n  {name}\n")
+    pretty = _pretty_period(period)
+    header = f"\n  {name}"
+    if pretty:
+        header += f"  (1 bar = {pretty})"
+    click.echo(header + "\n")
 
     for label, series_list, fmt in [
         ("CPU", cpu_series, _fmt_cpu),
@@ -508,7 +529,7 @@ def render_pod(cpu_series, mem_series, name):
         click.echo()
 
 
-def render_top(grouped, metric_type, limit, rows=None, columns=None):
+def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None):
     """Render ranked table of pods by metric value.
 
     When `rows` (list of {pod, extras, values}) and `columns` are provided,
@@ -542,6 +563,10 @@ def render_top(grouped, metric_type, limit, rows=None, columns=None):
     if not ranked:
         click.echo("No data found.")
         return
+
+    pretty = _pretty_period(period)
+    if pretty:
+        click.echo(f"  (1 TREND bar = {pretty})")
 
     max_name = max(len(r[0]) for r in ranked)
     max_name = max(max_name, 8)
@@ -610,11 +635,15 @@ def _format_query_labels(rl, ml):
     return "  ".join(parts)
 
 
-def render_query(series_list, metric_type):
+def render_query(series_list, metric_type, period=None):
     """Render raw time series output with sparklines."""
     if not series_list:
         click.echo("No time series found.")
         return
+
+    pretty = _pretty_period(period)
+    if pretty:
+        click.echo(f"\n  (1 bar = {pretty})")
 
     for s in series_list:
         rl = s.get("resource", {}).get("labels", {})
@@ -1035,7 +1064,7 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(result["cpu"], result["mem"], pod_name)
+        render_pod(result["cpu"], result["mem"], pod_name, period=period)
 
 
 @cli.command()
@@ -1115,6 +1144,7 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
             limit,
             rows=result.get("rows"),
             columns=result.get("columns"),
+            period=period,
         )
 
 
@@ -1165,7 +1195,7 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(result["cpu"], result["mem"], node_name)
+        render_pod(result["cpu"], result["mem"], node_name, period=period)
 
 
 @cli.command()
@@ -1236,7 +1266,7 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
     if ctx.obj["json"]:
         click.echo(json.dumps(series, indent=2))
     else:
-        render_query(series, metric_type)
+        render_query(series, metric_type, period=period)
 
 
 @cli.command()
