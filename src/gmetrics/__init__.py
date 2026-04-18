@@ -27,6 +27,7 @@ __all__ = [
     "metric_node",
     "metric_top",
     "metric_query",
+    "metric_labels",
     "metric_descriptors",
     "get_token",
     "set_token",
@@ -248,6 +249,51 @@ def _memory_type_filter(memory_type):
     return f'metric.labels.memory_type = "{memory_type}"'
 
 
+# Short aliases for common k8s_container label fields.
+# Users can pass either the short name ("cluster") or the full field
+# ("resource.labels.cluster_name") to --show.
+_FIELD_SHORTCUTS = {
+    "cluster": "resource.labels.cluster_name",
+    "namespace": "resource.labels.namespace_name",
+    "container": "resource.labels.container_name",
+    "location": "resource.labels.location",
+    "node": "resource.labels.node_name",
+    "pod": "resource.labels.pod_name",
+    "memory_type": "metric.labels.memory_type",
+    "mem_type": "metric.labels.memory_type",
+}
+
+
+def _resolve_show_fields(show_str):
+    """Parse a CSV list of field shortcuts or full field paths.
+
+    Returns list of (display, short_key, full_field) tuples. `display` is
+    the user-facing column header (shortcut name if one was given, else
+    the trailing label). `short_key` is the trailing label name
+    (e.g. "cluster_name") used to read from series.resource.labels or
+    series.metric.labels.
+    """
+    if not show_str:
+        return []
+    out = []
+    for raw in show_str.split(","):
+        name = raw.strip()
+        if not name:
+            continue
+        if name in _FIELD_SHORTCUTS:
+            display = name
+            full = _FIELD_SHORTCUTS[name]
+        else:
+            full = name
+            if "." not in full:
+                # Assume resource.labels.<name> for bare label names.
+                full = f"resource.labels.{full}"
+            display = full.rsplit(".", 1)[-1]
+        short = full.rsplit(".", 1)[-1]
+        out.append((display, short, full))
+    return out
+
+
 def _pod_filter(pod_name, namespace=None, cluster=None, container=None):
     """Build monitoring filter for pod-level k8s_container metrics."""
     parts = ['resource.type = "k8s_container"']
@@ -427,20 +473,35 @@ def render_pod(cpu_series, mem_series, name):
         click.echo()
 
 
-def render_top(grouped, metric_type, limit):
-    """Render ranked table of pods by metric value."""
+def render_top(grouped, metric_type, limit, rows=None, columns=None):
+    """Render ranked table of pods by metric value.
+
+    When `rows` (list of {pod, extras, values}) and `columns` are provided,
+    additional columns are rendered between POD and LAST. Otherwise falls
+    back to the legacy grouped-by-pod view.
+    """
     fmt = _fmt_cpu if "cpu" in metric_type else _fmt_bytes
+    columns = columns or []
 
     ranked = []
-    for pod_name, ts_values in grouped.items():
-        values = [v for _, v in sorted(ts_values)]
-        if not values:
-            continue
-        stats = _summary(values)
-        spark = _sparkline(values)
-        ranked.append((pod_name, stats, spark))
+    if rows and columns:
+        for r in rows:
+            values = [v for _, v in sorted(r["values"])]
+            if not values:
+                continue
+            stats = _summary(values)
+            spark = _sparkline(values)
+            ranked.append((r["pod"], r["extras"], stats, spark))
+    else:
+        for pod_name, ts_values in grouped.items():
+            values = [v for _, v in sorted(ts_values)]
+            if not values:
+                continue
+            stats = _summary(values)
+            spark = _sparkline(values)
+            ranked.append((pod_name, {}, stats, spark))
 
-    ranked.sort(key=lambda x: -x[1]["last"])
+    ranked.sort(key=lambda x: -x[2]["last"])
     ranked = ranked[:limit]
 
     if not ranked:
@@ -450,17 +511,30 @@ def render_top(grouped, metric_type, limit):
     max_name = max(len(r[0]) for r in ranked)
     max_name = max(max_name, 8)
 
-    click.echo(
-        f"  {'#':<3}  {'POD':<{max_name}}  {'LAST':>10}  {'AVG':>10}  "
-        f"{'MAX':>10}  TREND"
-    )
-    click.echo("  " + "\u2500" * (max_name + 45))
+    col_widths = {}
+    for col in columns:
+        width = max(len(col), *(len(str(r[1].get(col, ""))) for r in ranked))
+        col_widths[col] = max(width, 8)
 
-    for i, (pod_name, stats, spark) in enumerate(ranked, 1):
-        click.echo(
-            f"  {i:<3}  {pod_name:<{max_name}}  {fmt(stats['last']):>10}  "
-            f"{fmt(stats['avg']):>10}  {fmt(stats['max']):>10}  {spark}"
+    header = f"  {'#':<3}  {'POD':<{max_name}}"
+    for col in columns:
+        header += f"  {col.upper():<{col_widths[col]}}"
+    header += f"  {'LAST':>10}  {'AVG':>10}  {'MAX':>10}  TREND"
+    click.echo(header)
+
+    extra_width = sum(col_widths[c] + 2 for c in columns)
+    click.echo("  " + "\u2500" * (max_name + 45 + extra_width))
+
+    for i, (pod_name, extras, stats, spark) in enumerate(ranked, 1):
+        line = f"  {i:<3}  {pod_name:<{max_name}}"
+        for col in columns:
+            val = str(extras.get(col, ""))
+            line += f"  {val:<{col_widths[col]}}"
+        line += (
+            f"  {fmt(stats['last']):>10}  {fmt(stats['avg']):>10}  "
+            f"{fmt(stats['max']):>10}  {spark}"
         )
+        click.echo(line)
     click.echo()
 
 
@@ -659,12 +733,16 @@ def metric_top(
     limit=10,
     pod_pattern=None,
     memory_type="non-evictable",
+    show_fields=None,
 ):
     """Rank pods by CPU or memory usage.
 
     pod_pattern: optional substring to filter pod names (e.g. "my-service").
     memory_type: "non-evictable" (default), "evictable", or "any" — only
         applied when metric == "memory" (avoids double-counting).
+    show_fields: optional list of (short_key, full_field) tuples to include
+        as extra columns and in the group_by. Typically built from
+        _resolve_show_fields() but callers may pass their own list.
     """
     if metric == "cpu":
         metric_type, aligner = _CPU_METRIC, _CPU_ALIGNER
@@ -689,6 +767,9 @@ def metric_top(
             parts.append(mem_extra)
     filt = " AND ".join(parts)
 
+    show_fields = list(show_fields or [])
+    group_by = ["resource.labels.pod_name"] + [full for _, _, full in show_fields]
+
     params = _build_ts_params(
         metric_type,
         filt,
@@ -697,16 +778,27 @@ def metric_top(
         period,
         aligner=aligner,
         reducer=_DEFAULT_REDUCER,
-        group_by=["resource.labels.pod_name"],
+        group_by=group_by,
     )
     series_list = fetch_time_series(project, params)
 
+    rows = []
     grouped = defaultdict(list)
     for s in series_list:
         pod = _series_label(s, "pod_name")
-        grouped[pod].extend(_series_values(s))
+        extras = {
+            display: _series_label(s, short) for display, short, _ in show_fields
+        }
+        vals = _series_values(s)
+        grouped[pod].extend(vals)
+        rows.append({"pod": pod, "extras": extras, "values": vals})
 
-    return {"grouped": dict(grouped), "metric_type": metric_type}
+    return {
+        "grouped": dict(grouped),
+        "rows": rows,
+        "metric_type": metric_type,
+        "columns": [display for display, _, _ in show_fields],
+    }
 
 
 def metric_query(
@@ -737,6 +829,66 @@ def metric_query(
         group_by=group_by,
     )
     return fetch_time_series(project, params)
+
+
+def metric_labels(project, metric_type, *, filt=None, start="5m"):
+    """Discover available resource + metric labels for a metric type.
+
+    Returns {"resource": {key: sorted_values}, "metric": {key: sorted_values}}.
+    Probes a short time window without aggregation so every label is
+    preserved in the response.
+    """
+    _validate_user_filter(filt)
+    filter_parts = [f'metric.type = "{metric_type}"']
+    if filt:
+        filter_parts.append(filt)
+    params = {
+        "filter": " AND ".join(filter_parts),
+        "interval.startTime": _parse_time(start),
+        "interval.endTime": _now(),
+        "aggregation.alignmentPeriod": _parse_period("5m"),
+        "aggregation.perSeriesAligner": "ALIGN_NONE",
+    }
+    series_list = fetch_time_series(project, params, max_results=500)
+
+    resource_labels = defaultdict(set)
+    metric_labels_out = defaultdict(set)
+    for s in series_list:
+        for k, v in s.get("resource", {}).get("labels", {}).items():
+            resource_labels[k].add(v)
+        for k, v in s.get("metric", {}).get("labels", {}).items():
+            metric_labels_out[k].add(v)
+
+    return {
+        "metric_type": metric_type,
+        "series_sampled": len(series_list),
+        "resource": {k: sorted(v) for k, v in resource_labels.items()},
+        "metric": {k: sorted(v) for k, v in metric_labels_out.items()},
+    }
+
+
+def render_labels(info, max_samples=5):
+    """Render label discovery output."""
+    click.echo(f"\n  metric: {info['metric_type']}")
+    click.echo(f"  series sampled: {info['series_sampled']}\n")
+
+    for section, title in [("resource", "resource.labels"), ("metric", "metric.labels")]:
+        labels = info.get(section, {})
+        if not labels:
+            click.echo(f"  {title}: (none)\n")
+            continue
+        click.echo(f"  {title}:")
+        key_w = max(len(k) for k in labels) if labels else 0
+        for key in sorted(labels):
+            values = labels[key]
+            n = len(values)
+            samples = values[:max_samples]
+            suffix = ", ..." if n > max_samples else ""
+            click.echo(
+                f"    {key:<{key_w}}  ({n} values)  e.g. "
+                f"{', '.join(repr(v) for v in samples)}{suffix}"
+            )
+        click.echo()
 
 
 def metric_descriptors(project, *, filt=None):
@@ -877,9 +1029,19 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
     show_default=True,
     help="Memory series filter (memory metric only)",
 )
+@click.option(
+    "--show",
+    "show",
+    default=None,
+    help=(
+        "Extra columns to include (comma-separated). "
+        "Shortcuts: cluster, namespace, container, location, node, memory_type. "
+        "Or full GCP field paths, e.g. 'resource.labels.cluster_name'."
+    ),
+)
 @click.pass_context
 @_cli_validate
-def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern, memory_type):
+def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern, memory_type, show):
     """Rank pods by CPU or memory usage.
 
     \b
@@ -887,7 +1049,9 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
       gmetrics top cpu --namespace prod --start 15m
       gmetrics top memory --cluster us-east1 --limit 20
       gmetrics top memory --pod-pattern my-service --limit 20
+      gmetrics top memory --pod-pattern my-service --show cluster,namespace
     """
+    show_fields = _resolve_show_fields(show)
     result = metric_top(
         ctx.obj["project"],
         metric,
@@ -899,11 +1063,18 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
         limit=limit,
         pod_pattern=pod_pattern,
         memory_type=memory_type,
+        show_fields=show_fields,
     )
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_top(result["grouped"], result["metric_type"], limit)
+        render_top(
+            result["grouped"],
+            result["metric_type"],
+            limit,
+            rows=result.get("rows"),
+            columns=result.get("columns"),
+        )
 
 
 @cli.command()
@@ -1043,6 +1214,41 @@ def metrics(ctx, filt):
         click.echo(json.dumps(descriptors, indent=2))
     else:
         render_descriptors(descriptors)
+
+
+@cli.command()
+@click.argument("metric_type")
+@click.option(
+    "--filter",
+    "filt",
+    default=None,
+    help="Additional monitoring filter (same syntax as `query`)",
+)
+@click.option(
+    "--start",
+    default="5m",
+    show_default=True,
+    help="Probe window (short is fine; small label set usually stable)",
+)
+@click.pass_context
+@_cli_validate
+def labels(ctx, metric_type, filt, start):
+    """Show resource and metric labels available for a metric type.
+
+    Useful for finding which fields to pass to `top --show` or to
+    `query --group-by`.
+
+    \b
+    Examples:
+      gmetrics labels "kubernetes.io/container/memory/used_bytes"
+      gmetrics labels "kubernetes.io/container/memory/used_bytes" \\
+          --filter 'resource.labels.pod_name = starts_with("my-service")'
+    """
+    info = metric_labels(ctx.obj["project"], metric_type, filt=filt, start=start)
+    if ctx.obj["json"]:
+        click.echo(json.dumps(info, indent=2))
+    else:
+        render_labels(info)
 
 
 if __name__ == "__main__":

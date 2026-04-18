@@ -33,6 +33,7 @@ gmetrics top cpu|memory    # rank pods by resource usage
 gmetrics node <name>       # CPU + memory for a node
 gmetrics query <metric>    # generic metric query
 gmetrics metrics           # list/search metric descriptors
+gmetrics labels <metric>   # show available resource + metric labels
 ```
 
 ## Common flags
@@ -46,6 +47,7 @@ gmetrics metrics           # list/search metric descriptors
 | `--cluster` | Kubernetes cluster name |
 | `--memory-type` | `non-evictable` (default), `evictable`, `any` — avoids double-counting |
 | `--pod-pattern` | Substring filter on pod name (`top` only) |
+| `--show` | Extra columns for `top` — CSV of `cluster`, `namespace`, `container`, `location`, `node`, `memory_type`, or full GCP field paths |
 | `--json` | Raw JSON output (global, before command) |
 | `--project` | GCP project ID |
 
@@ -63,6 +65,13 @@ gmetrics top cpu --namespace production
 
 # Top 20 pods by memory in a cluster
 gmetrics top memory --cluster us-east1 --limit 20
+
+# Top with extra columns (cluster, namespace)
+gmetrics top memory --pod-pattern my-service --show cluster,namespace --limit 10
+
+# Discover which labels a metric exposes (useful for --show / --group-by)
+gmetrics labels "kubernetes.io/container/memory/used_bytes" \
+    --filter 'resource.labels.pod_name = starts_with("my-service")'
 
 # Node resources
 gmetrics node gke-my-cluster-pool-abc --start 2h
@@ -129,13 +138,30 @@ gmetrics query "kubernetes.io/container/memory/used_bytes" \
 ```json
 {
   "grouped": {"pod-name": [[ts, value], ...]},
+  "rows": [{"pod": "...", "extras": {"cluster": "..."}, "values": [[ts, v]]}],
+  "columns": ["cluster"],
   "metric_type": "kubernetes.io/container/cpu/core_usage_time"
 }
 ```
 
+`rows` and `columns` are always present; they carry the extra fields
+requested via `--show`. `grouped` is kept for backward compatibility
+(pod-name keyed).
+
 **`query`** — returns a **list** of series directly (no wrapping object).
 
 **`metrics`** — returns a list of metric descriptor objects.
+
+**`labels`**
+
+```json
+{
+  "metric_type": "kubernetes.io/container/memory/used_bytes",
+  "series_sampled": 500,
+  "resource": {"pod_name": [...], "cluster_name": [...]},
+  "metric": {"memory_type": ["evictable", "non-evictable"]}
+}
+```
 
 ### Series shape
 
