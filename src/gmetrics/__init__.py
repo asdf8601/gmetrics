@@ -29,6 +29,7 @@ __all__ = [
     "metric_query",
     "metric_labels",
     "metric_descriptors",
+    "auto_period",
     "get_token",
     "set_token",
     "fetch_time_series",
@@ -199,6 +200,40 @@ def _parse_period(s):
     n, u = int(m.group(1)), m.group(2)
     secs = {"s": n, "m": n * 60, "h": n * 3600}[u]
     return f"{secs}s"
+
+
+_NICE_PERIODS_SEC = (60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
+
+
+def _window_seconds(start):
+    """Return the window length in seconds for a relative start string.
+
+    Returns None if `start` is not relative (e.g. RFC3339 absolute).
+    """
+    if not start:
+        return None
+    m = re.match(r"^(\d+)([mhdw])$", start)
+    if not m:
+        return None
+    n, u = int(m.group(1)), m.group(2)
+    unit_secs = {"m": 60, "h": 3600, "d": 86400, "w": 604800}[u]
+    return n * unit_secs
+
+
+def auto_period(start, target_bars=60):
+    """Pick an alignment period so the window renders ~target_bars buckets.
+
+    Snaps to human-friendly values (60s, 5m, 15m, 30m, 1h, 3h, 6h, 12h, 1d).
+    Falls back to "60s" for absolute or unparseable start strings.
+    """
+    secs = _window_seconds(start)
+    if not secs:
+        return "60s"
+    bucket = max(60, secs // target_bars)
+    for v in _NICE_PERIODS_SEC:
+        if bucket <= v:
+            return f"{v}s"
+    return f"{_NICE_PERIODS_SEC[-1]}s"
 
 
 def _resolve_aligner(s):
@@ -957,7 +992,9 @@ def cli(ctx, project, as_json):
 )
 @click.option("--end", default=None, help="End time (default: now)")
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m, 1h)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start to render ~60 sparkline buckets.",
 )
 @click.option("--namespace", default=None, help="Kubernetes namespace")
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
@@ -983,6 +1020,7 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
       gmetrics pod my-service --start 1h --cluster us-east1
       gmetrics pod my-pod --namespace production --container main
     """
+    period = period or auto_period(start)
     result = metric_pod(
         ctx.obj["project"],
         pod_name,
@@ -1010,7 +1048,9 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
 )
 @click.option("--end", default=None, help="End time (default: now)")
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start.",
 )
 @click.option("--namespace", default=None, help="Kubernetes namespace")
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
@@ -1051,6 +1091,7 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
       gmetrics top memory --pod-pattern my-service --limit 20
       gmetrics top memory --pod-pattern my-service --show cluster,namespace
     """
+    period = period or auto_period(start)
     show_fields = _resolve_show_fields(show)
     result = metric_top(
         ctx.obj["project"],
@@ -1087,7 +1128,9 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
 )
 @click.option("--end", default=None, help="End time (default: now)")
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m, 1h)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start.",
 )
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
 @click.option(
@@ -1109,6 +1152,7 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
       gmetrics node gke-my-cluster-pool-abc
       gmetrics node my-node --start 2h --cluster us-east1
     """
+    period = period or auto_period(start)
     result = metric_node(
         ctx.obj["project"],
         node_name,
@@ -1156,7 +1200,9 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
     "--reducer", default=None, help="Cross-series reducer (sum, mean, max, min, count)"
 )
 @click.option(
-    "--period", default="60s", show_default=True, help="Alignment period (60s, 5m, 1h)"
+    "--period",
+    default=None,
+    help="Alignment period (60s, 5m, 1h). Default: auto-scaled from --start.",
 )
 @click.option("--group-by", default=None, help="Comma-separated fields to group by")
 @click.pass_context
@@ -1174,6 +1220,7 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
           --aligner max --group-by resource.labels.pod_name
       gmetrics query "custom.googleapis.com/my/metric" --aligner rate --period 5m
     """
+    period = period or auto_period(start)
     group_fields = [g.strip() for g in group_by.split(",")] if group_by else None
     series = metric_query(
         ctx.obj["project"],
