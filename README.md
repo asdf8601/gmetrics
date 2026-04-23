@@ -49,6 +49,7 @@ gmetrics labels <metric>   # show available resource + metric labels
 | `--pod-pattern` | Substring filter on pod name (`top` only) |
 | `--show` | Extra columns for `top` — CSV of `cluster`, `namespace`, `container`, `location`, `node`, `memory_type`, or full GCP field paths |
 | `--order` | Sort direction for `top` — `desc` (default, highest first) or `asc` (lowest first) |
+| `--lines` | Render `pod` / `node` as full line charts (plotext) instead of sparklines |
 | `--json` | Raw JSON output (global, before command) |
 | `--project` | GCP project ID |
 
@@ -60,6 +61,9 @@ gmetrics pod my-service
 
 # Pod with longer window and cluster filter
 gmetrics pod my-service --start 1h --cluster us-east1
+
+# Pod with full line chart (plotext) instead of sparklines
+gmetrics pod my-service --start 1h --lines
 
 # Top 10 pods by CPU
 gmetrics top cpu --namespace production

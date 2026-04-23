@@ -553,6 +553,32 @@ def _align_combined(series_list, start, end, period):
     return result
 
 
+def _align_combined_ts(series_list, start, end, period):
+    """Like `_align_combined` but returns [(datetime, value-or-None), ...]."""
+    if not series_list:
+        return []
+    period_sec = _period_secs(period)
+    start_epoch = _ts_to_epoch(_parse_time(start))
+    end_epoch = _ts_to_epoch(_parse_time(end) if end else _now())
+
+    by_bucket = defaultdict(float)
+    has = set()
+    for s in series_list:
+        for ts, v in _series_values(s):
+            bucket = (_ts_to_epoch(ts) // period_sec) * period_sec
+            by_bucket[bucket] += v
+            has.add(bucket)
+
+    result = []
+    b = (start_epoch // period_sec) * period_sec
+    last_bucket = (end_epoch // period_sec) * period_sec
+    while b <= last_bucket:
+        dt = datetime.fromtimestamp(b, tz=timezone.utc)
+        result.append((dt, by_bucket[b] if b in has else None))
+        b += period_sec
+    return result
+
+
 def _align_pairs(ts_value_pairs, start, end, period):
     """Align single-series (ts, value) pairs to [start, end] grid. None for gaps."""
     if not ts_value_pairs:
@@ -621,6 +647,71 @@ def render_pod(cpu_series, mem_series, name, period=None, start=None, end=None, 
             f"max {fmt(stats['max'])}  last {fmt(stats['last'])}"
         )
         click.echo()
+
+
+def _pick_mem_unit(max_bytes):
+    """Return (scale, unit) to render memory in MiB or GiB based on magnitude."""
+    if max_bytes >= 1024**3:
+        return 1 / (1024**3), "GiB"
+    return 1 / (1024**2), "MiB"
+
+
+def render_pod_lines(cpu_series, mem_series, name, period=None, start=None, end=None, memory_type=None):
+    """Render CPU + memory as line charts via plotext.
+
+    Two stacked subplots: CPU in millicores (top), Memory in MiB/GiB (bottom).
+    Requires `start` for timestamp alignment; unaligned mode falls back to
+    `render_pod`.
+    """
+    if not start:
+        return render_pod(cpu_series, mem_series, name, period=period, memory_type=memory_type)
+
+    import plotext as plt
+
+    pretty = _pretty_period(period)
+    meta = []
+    if pretty:
+        meta.append(f"1 point = {pretty}")
+    if memory_type:
+        meta.append(f"memory_type={memory_type}")
+    subtitle = "  (" + ", ".join(meta) + ")" if meta else ""
+    click.echo(f"\n  {name}{subtitle}\n")
+
+    cpu_pairs = _align_combined_ts(cpu_series, start, end, period) if cpu_series else []
+    mem_pairs = _align_combined_ts(mem_series, start, end, period) if mem_series else []
+
+    cpu_x = [dt for dt, v in cpu_pairs if v is not None]
+    cpu_y = [v * 1000.0 for _, v in cpu_pairs if v is not None]
+
+    mem_max = max((v for _, v in mem_pairs if v is not None), default=0)
+    mem_scale, mem_unit = _pick_mem_unit(mem_max)
+    mem_x = [dt for dt, v in mem_pairs if v is not None]
+    mem_y = [v * mem_scale for _, v in mem_pairs if v is not None]
+
+    if not cpu_y and not mem_y:
+        click.echo("  no data points\n")
+        return
+
+    plt.clf()
+    plt.theme("clear")
+    plt.subplots(2, 1)
+
+    plt.subplot(1, 1)
+    plt.date_form("H:M")
+    plt.title("CPU (mCPU)")
+    if cpu_y:
+        plt.plot(plt.datetimes_to_string(cpu_x), cpu_y, marker="braille")
+        plt.ylim(0, max(cpu_y) * 1.1 if max(cpu_y) > 0 else 1)
+
+    plt.subplot(2, 1)
+    plt.date_form("H:M")
+    plt.title(f"Memory ({mem_unit})")
+    if mem_y:
+        plt.plot(plt.datetimes_to_string(mem_x), mem_y, marker="braille")
+        plt.ylim(0, max(mem_y) * 1.1 if max(mem_y) > 0 else 1)
+
+    plt.show()
+    click.echo()
 
 
 def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None, order="desc", start=None, end=None):
@@ -1150,9 +1241,15 @@ def cli(ctx, project, as_json):
         "'evictable'=page cache only."
     ),
 )
+@click.option(
+    "--lines",
+    is_flag=True,
+    default=False,
+    help="Render as full line chart (plotext) instead of sparkline.",
+)
 @click.pass_context
 @_cli_validate
-def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory_type):
+def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory_type, lines):
     """CPU and memory for a Kubernetes pod.
 
     POD_NAME is a substring match (e.g. 'my-service' matches
@@ -1179,7 +1276,8 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(
+        renderer = render_pod_lines if lines else render_pod
+        renderer(
             result["cpu"],
             result["mem"],
             pod_name,
@@ -1314,9 +1412,15 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
         "'evictable'=page cache."
     ),
 )
+@click.option(
+    "--lines",
+    is_flag=True,
+    default=False,
+    help="Render as full line chart (plotext) instead of sparkline.",
+)
 @click.pass_context
 @_cli_validate
-def node(ctx, node_name, start, end, period, cluster, memory_type):
+def node(ctx, node_name, start, end, period, cluster, memory_type, lines):
     """CPU and memory for a Kubernetes node.
 
     NODE_NAME is a substring match.
@@ -1339,7 +1443,8 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(
+        renderer = render_pod_lines if lines else render_pod
+        renderer(
             result["cpu"],
             result["mem"],
             node_name,
