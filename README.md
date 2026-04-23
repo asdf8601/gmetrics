@@ -45,7 +45,7 @@ gmetrics labels <metric>   # show available resource + metric labels
 | `--period` | Alignment period (`60s`, `5m`) |
 | `--namespace` | Kubernetes namespace |
 | `--cluster` | Kubernetes cluster name |
-| `--memory-type` | `non-evictable` (default), `evictable`, `any` — avoids double-counting |
+| `--memory-type` | `any` (default, total — matches GCP Metrics Explorer), `non-evictable` (working set — matches `kubectl top`), `evictable` (page cache) |
 | `--pod-pattern` | Substring filter on pod name (`top` only) |
 | `--show` | Extra columns for `top` — CSV of `cluster`, `namespace`, `container`, `location`, `node`, `memory_type`, or full GCP field paths |
 | `--order` | Sort direction for `top` — `desc` (default, highest first) or `asc` (lowest first) |
@@ -106,14 +106,18 @@ not PromQL:
 
 `=~` and `!~` are **not** supported — gmetrics rejects these with a hint.
 
-### Memory metric gotcha
+### Memory metric: `--memory-type`
 
-`kubernetes.io/container/memory/used_bytes` returns **two series per pod**
-(`memory_type = evictable` + `memory_type = non-evictable`). Summing both
-double-counts resident memory.
+`kubernetes.io/container/memory/used_bytes` returns **two series per pod**:
 
-`pod` / `node` / `top` default to `--memory-type non-evictable`. Override
-with `--memory-type evictable` or `--memory-type any`.
+- `non-evictable` — working set (RSS + kernel stacks). What `kubectl top`
+  shows and what the OOM killer watches.
+- `evictable` — page cache. Reclaimable under pressure.
+- `any` — total (sum of both). What GCP Metrics Explorer shows by default.
+
+`pod` / `node` / `top` default to `--memory-type any` so output matches the
+GCP console. Use `--memory-type non-evictable` for working-set numbers
+matching `kubectl top`.
 
 For `query`, add the filter manually:
 
