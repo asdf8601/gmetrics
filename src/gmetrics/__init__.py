@@ -432,14 +432,16 @@ def _series_label(series, key):
 
 
 def _summary(values):
-    """Compute min/avg/max/last from a list of values."""
-    if not values:
+    """Compute min/avg/max/last from a list of values. Ignores None (gaps)."""
+    vals = [v for v in values if v is not None]
+    if not vals:
         return {"min": 0, "avg": 0, "max": 0, "last": 0}
+    last_val = next((v for v in reversed(values) if v is not None), vals[-1])
     return {
-        "min": min(values),
-        "avg": sum(values) / len(values),
-        "max": max(values),
-        "last": values[-1],
+        "min": min(vals),
+        "avg": sum(vals) / len(vals),
+        "max": max(vals),
+        "last": last_val,
     }
 
 
@@ -449,14 +451,23 @@ _SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
 
 
 def _sparkline(values):
-    """Render a list of numbers as a Unicode sparkline."""
+    """Render numbers as Unicode sparkline. None entries render as gap (space)."""
     if not values:
         return ""
-    mn, mx = min(values), max(values)
+    real = [v for v in values if v is not None]
+    if not real:
+        return " " * len(values)
+    mn, mx = min(real), max(real)
     if mn == mx:
-        return _SPARK[3] * len(values)
+        return "".join(" " if v is None else _SPARK[3] for v in values)
     rng = mx - mn
-    return "".join(_SPARK[min(int((v - mn) / rng * 7), 7)] for v in values)
+    out = []
+    for v in values:
+        if v is None:
+            out.append(" ")
+        else:
+            out.append(_SPARK[min(int((v - mn) / rng * 7), 7)])
+    return "".join(out)
 
 
 def _fmt_bytes(n):
@@ -497,12 +508,88 @@ def _combine_series(series_list):
     return [v for _, v in ordered]
 
 
-def render_pod(cpu_series, mem_series, name, period=None):
-    """Render CPU + memory for a pod/node with sparklines and summary."""
+def _ts_to_epoch(ts_str):
+    """Parse RFC3339 timestamp to epoch seconds (UTC)."""
+    s = ts_str.replace("Z", "+00:00")
+    return int(datetime.fromisoformat(s).timestamp())
+
+
+def _period_secs(period):
+    """Return period in seconds from API string like '300s'."""
+    if not period:
+        return 60
+    m = re.match(r"^(\d+)s$", period)
+    if m:
+        return int(m.group(1))
+    m = re.match(r"^(\d+)([smh])$", period)
+    if m:
+        n, u = int(m.group(1)), m.group(2)
+        return {"s": n, "m": n * 60, "h": n * 3600}[u]
+    return 60
+
+
+def _align_combined(series_list, start, end, period):
+    """Sum series per bucket across [start, end] grid. None for missing buckets."""
+    if not series_list:
+        return []
+    period_sec = _period_secs(period)
+    start_epoch = _ts_to_epoch(_parse_time(start))
+    end_epoch = _ts_to_epoch(_parse_time(end) if end else _now())
+
+    by_bucket = defaultdict(float)
+    has = set()
+    for s in series_list:
+        for ts, v in _series_values(s):
+            bucket = (_ts_to_epoch(ts) // period_sec) * period_sec
+            by_bucket[bucket] += v
+            has.add(bucket)
+
+    result = []
+    b = (start_epoch // period_sec) * period_sec
+    last_bucket = (end_epoch // period_sec) * period_sec
+    while b <= last_bucket:
+        result.append(by_bucket[b] if b in has else None)
+        b += period_sec
+    return result
+
+
+def _align_pairs(ts_value_pairs, start, end, period):
+    """Align single-series (ts, value) pairs to [start, end] grid. None for gaps."""
+    if not ts_value_pairs:
+        return []
+    period_sec = _period_secs(period)
+    start_epoch = _ts_to_epoch(_parse_time(start))
+    end_epoch = _ts_to_epoch(_parse_time(end) if end else _now())
+
+    by_bucket = {}
+    for ts, v in ts_value_pairs:
+        bucket = (_ts_to_epoch(ts) // period_sec) * period_sec
+        by_bucket[bucket] = v
+
+    result = []
+    b = (start_epoch // period_sec) * period_sec
+    last_bucket = (end_epoch // period_sec) * period_sec
+    while b <= last_bucket:
+        result.append(by_bucket.get(b))
+        b += period_sec
+    return result
+
+
+def render_pod(cpu_series, mem_series, name, period=None, start=None, end=None, memory_type=None):
+    """Render CPU + memory for a pod/node with sparklines and summary.
+
+    When `start` is provided, values are aligned to the [start, end] bucket
+    grid so missing buckets render as gaps in the sparkline.
+    """
     pretty = _pretty_period(period)
     header = f"\n  {name}"
+    meta = []
     if pretty:
-        header += f"  (1 bar = {pretty})"
+        meta.append(f"1 bar = {pretty}")
+    if memory_type:
+        meta.append(f"memory_type={memory_type}")
+    if meta:
+        header += "  (" + ", ".join(meta) + ")"
     click.echo(header + "\n")
 
     sections = [
@@ -517,8 +604,11 @@ def render_pod(cpu_series, mem_series, name, period=None):
             click.echo(f"  {label:<{label_w}}: no data\n")
             continue
 
-        values = _combine_series(series_list)
-        if not values:
+        if start:
+            values = _align_combined(series_list, start, end, period)
+        else:
+            values = _combine_series(series_list)
+        if not values or all(v is None for v in values):
             click.echo(f"  {label:<{label_w}}: no data points\n")
             continue
 
@@ -533,7 +623,7 @@ def render_pod(cpu_series, mem_series, name, period=None):
         click.echo()
 
 
-def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None, order="desc"):
+def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None, order="desc", start=None, end=None):
     """Render ranked table of pods by metric value.
 
     When `rows` (list of {pod, extras, values}) and `columns` are provided,
@@ -545,19 +635,25 @@ def render_top(grouped, metric_type, limit, rows=None, columns=None, period=None
     fmt = _fmt_cpu if "cpu" in metric_type else _fmt_bytes
     columns = columns or []
 
+    def _values_for(ts_pairs):
+        sorted_pairs = sorted(ts_pairs)
+        if start:
+            return _align_pairs(sorted_pairs, start, end, period)
+        return [v for _, v in sorted_pairs]
+
     ranked = []
     if rows and columns:
         for r in rows:
-            values = [v for _, v in sorted(r["values"])]
-            if not values:
+            values = _values_for(r["values"])
+            if not values or all(v is None for v in values):
                 continue
             stats = _summary(values)
             spark = _sparkline(values)
             ranked.append((r["pod"], r["extras"], stats, spark))
     else:
         for pod_name, ts_values in grouped.items():
-            values = [v for _, v in sorted(ts_values)]
-            if not values:
+            values = _values_for(ts_values)
+            if not values or all(v is None for v in values):
                 continue
             stats = _summary(values)
             spark = _sparkline(values)
@@ -641,7 +737,7 @@ def _format_query_labels(rl, ml):
     return "  ".join(parts)
 
 
-def render_query(series_list, metric_type, period=None):
+def render_query(series_list, metric_type, period=None, start=None, end=None):
     """Render raw time series output with sparklines."""
     if not series_list:
         click.echo("No time series found.")
@@ -657,7 +753,10 @@ def render_query(series_list, metric_type, period=None):
         label_str = _format_query_labels(rl, ml)
 
         vals = _series_values(s)
-        values = [v for _, v in vals]
+        if start:
+            values = _align_pairs(vals, start, end, period)
+        else:
+            values = [v for _, v in vals]
         spark = _sparkline(values)
         stats = _summary(values)
         click.echo(f"\n  {label_str}")
@@ -667,7 +766,7 @@ def render_query(series_list, metric_type, period=None):
             f"avg {_fmt_val(stats['avg'], metric_type)}  "
             f"max {_fmt_val(stats['max'], metric_type)}  "
             f"last {_fmt_val(stats['last'], metric_type)}  "
-            f"({len(values)} points)"
+            f"({sum(1 for v in values if v is not None)} points)"
         )
     click.echo()
 
@@ -703,12 +802,13 @@ def metric_pod(
     namespace=None,
     cluster=None,
     container=None,
-    memory_type="non-evictable",
+    memory_type="any",
 ):
     """Fetch CPU + memory for a pod.
 
-    memory_type: "non-evictable" (default), "evictable", or "any".
-        Memory metric returns two series per pod; filtering avoids double-sum.
+    memory_type: "any" (default, total — matches GCP Metrics Explorer),
+        "non-evictable" (working set, matches `kubectl top`), or "evictable"
+        (page cache only).
     """
     filt = _pod_filter(
         pod_name, namespace=namespace, cluster=cluster, container=container
@@ -754,9 +854,13 @@ def metric_node(
     end=None,
     period="60s",
     cluster=None,
-    memory_type="non-evictable",
+    memory_type="any",
 ):
-    """Fetch CPU + memory for a node."""
+    """Fetch CPU + memory for a node.
+
+    memory_type: "any" (default, total), "non-evictable" (working set),
+        or "evictable" (page cache).
+    """
     filt = _node_filter(node_name, cluster=cluster)
     mem_extra = _memory_type_filter(memory_type)
     mem_filt = f"{filt} AND {mem_extra}" if mem_extra else filt
@@ -802,7 +906,7 @@ def metric_top(
     cluster=None,
     limit=10,
     pod_pattern=None,
-    memory_type="non-evictable",
+    memory_type="any",
     show_fields=None,
 ):
     """Rank pods by CPU or memory usage.
@@ -1036,10 +1140,15 @@ def cli(ctx, project, as_json):
 @click.option("--container", default=None, help="Container name (default: all)")
 @click.option(
     "--memory-type",
-    type=click.Choice(["non-evictable", "evictable", "any"]),
-    default="non-evictable",
+    type=click.Choice(["any", "non-evictable", "evictable"]),
+    default="any",
     show_default=True,
-    help="Memory series filter (avoids evictable+non-evictable double-sum)",
+    help=(
+        "Memory series filter. "
+        "'any'=total (RSS+cache, matches GCP Metrics Explorer). "
+        "'non-evictable'=working set (matches `kubectl top`, used for OOM). "
+        "'evictable'=page cache only."
+    ),
 )
 @click.pass_context
 @_cli_validate
@@ -1070,7 +1179,15 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(result["cpu"], result["mem"], pod_name, period=period)
+        render_pod(
+            result["cpu"],
+            result["mem"],
+            pod_name,
+            period=period,
+            start=start,
+            end=end,
+            memory_type=memory_type,
+        )
 
 
 @cli.command()
@@ -1099,10 +1216,15 @@ def pod(ctx, pod_name, start, end, period, namespace, cluster, container, memory
 )
 @click.option(
     "--memory-type",
-    type=click.Choice(["non-evictable", "evictable", "any"]),
-    default="non-evictable",
+    type=click.Choice(["any", "non-evictable", "evictable"]),
+    default="any",
     show_default=True,
-    help="Memory series filter (memory metric only)",
+    help=(
+        "Memory series filter (memory metric only). "
+        "'any'=total (matches GCP Metrics Explorer). "
+        "'non-evictable'=working set (matches `kubectl top`). "
+        "'evictable'=page cache."
+    ),
 )
 @click.option(
     "--show",
@@ -1160,6 +1282,8 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
             columns=result.get("columns"),
             period=period,
             order=order,
+            start=start,
+            end=end,
         )
 
 
@@ -1180,10 +1304,15 @@ def top(ctx, metric, start, end, period, namespace, cluster, limit, pod_pattern,
 @click.option("--cluster", default=None, help="Kubernetes cluster name")
 @click.option(
     "--memory-type",
-    type=click.Choice(["non-evictable", "evictable", "any"]),
-    default="non-evictable",
+    type=click.Choice(["any", "non-evictable", "evictable"]),
+    default="any",
     show_default=True,
-    help="Memory series filter (avoids double-sum)",
+    help=(
+        "Memory series filter. "
+        "'any'=total (matches GCP Metrics Explorer). "
+        "'non-evictable'=working set (matches `kubectl top`). "
+        "'evictable'=page cache."
+    ),
 )
 @click.pass_context
 @_cli_validate
@@ -1210,7 +1339,15 @@ def node(ctx, node_name, start, end, period, cluster, memory_type):
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
     else:
-        render_pod(result["cpu"], result["mem"], node_name, period=period)
+        render_pod(
+            result["cpu"],
+            result["mem"],
+            node_name,
+            period=period,
+            start=start,
+            end=end,
+            memory_type=memory_type,
+        )
 
 
 @cli.command()
@@ -1281,7 +1418,7 @@ def query(ctx, metric_type, start, end, filt, aligner, reducer, period, group_by
     if ctx.obj["json"]:
         click.echo(json.dumps(series, indent=2))
     else:
-        render_query(series, metric_type, period=period)
+        render_query(series, metric_type, period=period, start=start, end=end)
 
 
 @cli.command()
